@@ -9,7 +9,7 @@ import os
 import re
 
 st.set_page_config(page_title="Procurement Automation Tool", layout="wide")
-st.title("📊 Automated Vendor PFI Comparative Analysis (Row-Mapping Engine)")
+st.title("📊 Automated Vendor PFI Comparative Analysis (Line-Audit Engine)")
 st.subheader("Upload your template and scanned/digital vendor PFIs to auto-populate names and prices.")
 
 # Sidebar for API Key configuration
@@ -37,31 +37,32 @@ def convert_pdf_to_images(pdf_file):
         return []
 
 def parse_pfi_images_with_ai(pfi_images, row_item_dict, api_key_str):
-    """Sends document images to Gemini to perform OCR and direct row mapping."""
+    """Sends document images to Gemini to perform OCR and precise line auditing."""
     try:
         client = genai.Client(api_key=api_key_str)
         
-        prompt_text = f"""You are a master procurement auditor mapping vendor invoice prices directly to our spreadsheet row coordinates.
-        Look closely at the attached invoice image(s).
+        prompt_text = f"""You are a meticulous procurement forensic auditor. Your job is to extract data from the attached invoice image(s) with 100% horizontal accuracy. 
+        Do not mismatch columns or lines.
         
-        Your Core Instructions:
-        1. Extract the official Vendor Name from the letterhead/logo at the top.
-        2. Match the items printed on this invoice image to our Master Spreadsheet Items list below.
-        3. For every item you match, extract its numeric UNIT PRICE and pair it directly with its corresponding SPREADSHEET ROW NUMBER.
-        
-        Master Spreadsheet Items (Format is "ROW_NUMBER": "ITEM DESCRIPTION"):
+        Our Master Spreadsheet Items (Format is "ROW_NUMBER": "ITEM DESCRIPTION"):
         {json.dumps(row_item_dict, indent=2)}
         
-        Matching Guardrails:
-        - Vendors will use heavy abbreviations, different word orders, or shortened specs (e.g., 'BLT' vs 'Bolt', 'SS' vs 'Stainless', '10mm' vs 'M10'). Match them flexibly using your engineering and procurement knowledge.
-        - Only return matches where you are confident the physical item is the same.
+        Your Mission:
+        1. Extract the official Vendor Name from the top header/logo.
+        2. Go line-by-line through the vendor's invoice image. For EACH printed item, find the matching item in our spreadsheet list using your procurement knowledge (abbreviations like BLT, SS, MS, DIA match formal names).
+        3. Double check the table columns on the image. Make sure you extract the UNIT PRICE, not the quantity, serial number, or line total.
         
-        OUTPUT FORMAT:
-        You must output your findings strictly as a clean JSON object structure. Do not wrap it in markdown code blocks.
+        CRITICAL TWO-STEP OUTPUT FORMAT:
+        You must structure your response exactly like this JSON layout. 
+        Use the "audit_trail" section to write down your reasoning line-by-line first to lock in your accuracy. Then put the final mappings in "row_prices". Do not use markdown wrappers.
+        
         {{
             "vendor_name": "Official Vendor Name",
+            "audit_trail": [
+                "Invoice Line 1 says 'HEX BLT 10MM' with unit price 15.00. This matches Spreadsheet Row 9 ('10mm Hexagonal Stainless Bolt')."
+            ],
             "row_prices": {{
-                "ROW_NUMBER_AS_STRING": 1250.00
+                "9": 15.00
             }}
         }}
         """
@@ -88,8 +89,8 @@ def parse_pfi_images_with_ai(pfi_images, row_item_dict, api_key_str):
         
         response_text = response.text.strip()
         
-        # Display response diagnostic logs
-        with st.expander("🔍 Live AI Extraction Inspection Log"):
+        # Display the audit trail logs live in Streamlit
+        with st.expander("🔍 View AI Line-by-Line Match Explanations"):
             st.code(response_text, language="json")
             
         json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
@@ -106,51 +107,43 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
     if not api_key:
         st.warning("Please enter your Gemini API Key in the sidebar.")
     else:
-        with st.spinner("Executing Coordinate OCR Vision Analysis..."):
+        with st.spinner("Running Audited Line-by-Line Vision Extraction..."):
             wb = openpyxl.load_workbook(template_file)
             ws = wb.active
             
-            # Map Row Numbers directly to Descriptions to eliminate Python matching errors
             row_item_dict = {}
-            
             for row in range(9, ws.max_row + 1):
-                item_desc = ws.cell(row=row, column=3).value # Column C
+                item_desc = ws.cell(row=row, column=3).value
                 if item_desc:
                     clean_desc = re.sub(r'\s+', ' ', str(item_desc)).strip()
                     if "ITEM DESCRIPTION" in clean_desc.upper() or not clean_desc:
                         continue
-                    # Store row as string key for seamless JSON processing
                     row_item_dict[str(row)] = clean_desc
             
             if not row_item_dict:
                 st.error("No item descriptions found in Column C from row 9 down.")
             else:
-                st.info(f"Loaded {len(row_item_dict)} items from your spreadsheet matrix.")
+                st.info(f"Loaded {len(row_item_dict)} target items from your comparative matrix.")
                 
-                # Target columns for Vendor 1, 2, 3, 4 (E, H, K, N)
-                vendor_start_cols = [5, 8, 11, 14]
+                vendor_start_cols = [5, 8, 11, 14] # E, H, K, N
                 
                 for index, pfi in enumerate(pfi_files[:4]):
-                    st.write(f"📷 Processing Document: **{pfi.name}**...")
+                    st.write(f"📷 Analyzing Layout & Alignment for: **{pfi.name}**...")
                     
                     pfi_images = convert_pdf_to_images(pfi)
                     if not pfi_images:
-                        st.warning(f"Skipping {pfi.name} due to PDF transformation error.")
+                        st.warning(f"Skipping {pfi.name} due to image generation error.")
                         continue
                         
-                    # Request data from Gemini using direct row mapping payload
                     extracted_data = parse_pfi_images_with_ai(pfi_images, row_item_dict, api_key)
                     
                     vendor_name = extracted_data.get("vendor_name", f"Vendor {index + 1}")
                     row_prices = extracted_data.get("row_prices", {})
                     
                     target_col = vendor_start_cols[index]
-                    
-                    # Write vendor name to Row 8
                     ws.cell(row=8, column=target_col).value = vendor_name
                     
                     match_count = 0
-                    # Write values directly into the row numbers specified by the AI
                     for row_str, price in row_prices.items():
                         try:
                             target_row = int(row_str)
@@ -159,14 +152,14 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
                         except (ValueError, TypeError):
                             pass
                     
-                    st.success(f"✅ Extracted **{vendor_name}** ({pfi.name}). Successfully mapped {match_count} items directly to rows.")
+                    st.success(f"✅ Finished **{vendor_name}** ({pfi.name}). Mapped {match_count} verified prices.")
                 
                 output_filename = "Populated_Comparative_Analysis.xlsx"
                 wb.save(output_filename)
                 
                 with open(output_filename, "rb") as file:
                     st.download_button(
-                        label="📥 Download Completed Excel Sheet",
+                        label="📥 Download Corrected Excel Sheet",
                         data=file,
                         file_name=output_filename,
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
