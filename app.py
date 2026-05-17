@@ -8,9 +8,9 @@ import json
 import os
 import re
 
-st.set_page_config(page_title="Procurement Tool - Single Vendor Engine", layout="wide")
-st.title("📊 Single Vendor Quotation Matcher")
-st.subheader("Upload your template and one vendor quotation to map material prices cleanly.")
+st.set_page_config(page_title="Procurement Tool - Alignment Engine", layout="wide")
+st.title("📊 Part-Quote Alignment Matcher")
+st.subheader("Maps available vendor prices to correct material cells, automatically skipping unquoted items.")
 
 # Sidebar for Setup
 with st.sidebar:
@@ -23,64 +23,59 @@ template_file = st.file_uploader("1. Upload Excel Template (.xlsx)", type=["xlsx
 pfi_file = st.file_uploader("2. Upload Single Vendor Quotation (PDF)", type=["pdf"])
 
 def convert_pdf_to_images(pdf_file):
-    """Converts the PDF into images so the AI can physically see scanned text and tables."""
     try:
         pdf_bytes = pdf_file.read()
         pdf_file.seek(0)
         return convert_from_bytes(pdf_bytes)
     except Exception as e:
-        st.error(f"Failed to convert PDF to images. Is Poppler configured? Error: {e}")
+        st.error(f"Failed to convert PDF to images: {e}")
         return []
 
 if st.button("🚀 Match & Populate Excel") and template_file and pfi_file:
     if not api_key:
         st.warning("Please enter your Gemini API Key in the sidebar.")
     else:
-        with st.spinner("Processing document and running visual alignment..."):
-            # 1. Open the Excel workbook
+        with st.spinner("Aligning partial quotation matrices..."):
             wb = openpyxl.load_workbook(template_file)
             ws = wb.active
             
-            # 2. Build our target mapping map directly from Column C (Row 9 downwards)
+            # Read all master materials from Column C (Row 9 down)
             row_item_dict = {}
             for row in range(9, ws.max_row + 1):
-                item_desc = ws.cell(row=row, column=3).value # Column C is 3
+                item_desc = ws.cell(row=row, column=3).value
                 if item_desc:
                     clean_desc = re.sub(r'\s+', ' ', str(item_desc)).strip()
-                    # Skip header labels or structural noise
                     if "ITEM DESCRIPTION" in clean_desc.upper() or not clean_desc:
                         continue
                     row_item_dict[str(row)] = clean_desc
             
-            st.info(f"Loaded {len(row_item_dict)} material lines from your Excel sheet.")
+            st.info(f"Loaded {len(row_item_dict)} total material items requested from Excel.")
             
-            # 3. Convert PDF pages to images
             images = convert_pdf_to_images(pfi_file)
             
             if not images:
-                st.error("Could not extract pages from the PDF quotation.")
+                st.error("Could not process PDF pages.")
             else:
-                # 4. Craft the prompt forcing Gemini to map using spreadsheet rows directly
-                prompt_text = f"""You are an expert procurement data extraction engine. Analyze the attached quotation image(s).
+                prompt_text = f"""You are a precise procurement data entry operator. Analyze the attached vendor quotation image(s).
                 
-                Tasks:
-                1. Identify the official VENDOR NAME from the header/letterhead.
-                2. Match the items on this invoice to our target spreadsheet items list. 
-                   - Look past severe industry abbreviations (e.g., 'BLT' -> 'Bolt', 'SS' -> 'Stainless Steel'). Match them flexibly using your procurement domain knowledge.
-                3. Extract ONLY the raw numeric UNIT PRICE. Ignore quantities or line totals.
+                CRITICAL INSTRUCTIONS FOR PARTIAL QUOTES:
+                1. Identify the official VENDOR NAME from the document header.
+                2. Cross-reference the items on the invoice with our Master Spreadsheet Items list below.
+                3. The vendor may NOT have quoted for all items requested. For every item the vendor DID quote, find its matching item in our Master list and extract its numeric UNIT PRICE.
+                4. If an item on our Master list is missing from the vendor invoice, DO NOT include its row number in the output dictionary.
+                5. Ensure you extract the UNIT PRICE, not the quantity or line total.
                 
-                Our Target Spreadsheet Items (Format is "ROW_NUMBER": "EXACT MATERIAL DESCRIPTION"):
+                Our Master Spreadsheet Items (Format is \"ROW_NUMBER\": \"EXACT MATERIAL DESCRIPTION\"):
                 {json.dumps(row_item_dict, indent=2)}
                 
-                Return your response strictly as a clean JSON object structure matching this exact format. Do not use markdown syntax block wraps:
+                Return your response strictly as a clean JSON object structure (no markdown wrappers):
                 {{
                     "vendor_name": "Official Vendor Name",
                     "row_prices": {{
-                        "9": 1500.00
+                        "SPREADSHEET_ROW_NUMBER": 1500.00
                     }}
                 }}"""
                 
-                # Assemble text instructions and visual pages
                 contents = [prompt_text]
                 for img in images:
                     img_byte_arr = io.BytesIO()
@@ -88,7 +83,6 @@ if st.button("🚀 Match & Populate Excel") and template_file and pfi_file:
                     contents.append(types.Part.from_bytes(data=img_byte_arr.getvalue(), mime_type="image/jpeg"))
                 
                 try:
-                    # Initialize the official Google GenAI Client
                     client = genai.Client(api_key=api_key)
                     
                     response = client.models.generate_content(
@@ -97,43 +91,41 @@ if st.button("🚀 Match & Populate Excel") and template_file and pfi_file:
                         config=types.GenerateContentConfig(response_mime_type="application/json")
                     )
                     
-                    response_text = response.text.strip()
-                    extracted_data = json.loads(response_text)
+                    extracted_data = json.loads(response.text.strip())
                     
-                    # --- LIVE DIAGNOSTIC STREAM ON SCREEN ---
-                    st.success("🤖 **Raw Live AI Extraction Data Matrix:**")
+                    # Live status screen print
+                    st.success("🤖 **Live AI Extraction Matrix Map:**")
                     st.json(extracted_data)
                     
                     vendor_name = extracted_data.get("vendor_name", "Unknown Vendor")
                     row_prices = extracted_data.get("row_prices", {})
                     
-                    # 5. Write Vendor Name to Column E, Row 8 (First vendor slot)
+                    # Place Vendor Name in Column E, Row 8
                     ws.cell(row=8, column=5).value = vendor_name
                     
-                    # 6. Inject prices down Column E using the exact row keys provided by the AI
+                    # Inject prices precisely down Column E matching row designations
                     match_count = 0
-                    st.write("### ⚙️ Excel Writing Stream Logs:")
+                    st.write("### ⚙️ Cell Allocation Log:")
                     for row_str, price in row_prices.items():
                         try:
                             target_row = int(row_str)
-                            # Strip formatting remnants safely
                             clean_price = float(str(price).replace(",", "").strip())
                             
+                            # Input value into cell coordinate
                             ws.cell(row=target_row, column=5).value = clean_price
-                            st.write(f"➡️ Placed price `{clean_price}` onto Row `{target_row}` (Material: *{row_item_dict.get(row_str)}*)")
+                            st.write(f"➡️ Injected `{clean_price}` into Cell `E{target_row}` (Material Match: *{row_item_dict.get(row_str)}*)")
                             match_count += 1
                         except (ValueError, TypeError):
                             pass
                             
-                    st.success(f"🎉 Complete! Mapped {match_count} material items for **{vendor_name}** into Column E.")
+                    st.success(f"🎉 Aligned and mapped {match_count} prices for **{vendor_name}** into Column E. Unquoted rows were safely skipped.")
                     
-                    # 7. Package updated file for instant browser download
-                    output_filename = "Single_Vendor_Populated.xlsx"
+                    output_filename = "Aligned_Vendor_Analysis.xlsx"
                     wb.save(output_filename)
                     
                     with open(output_filename, "rb") as file:
                         st.download_button(
-                            label="📥 Download Processed Excel Sheet",
+                            label="📥 Download Aligned Spreadsheet",
                             data=file,
                             file_name=output_filename,
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -141,4 +133,4 @@ if st.button("🚀 Match & Populate Excel") and template_file and pfi_file:
                     os.remove(output_filename)
                     
                 except Exception as e:
-                    st.error(f"Error communicating with Gemini Vision API: {e}")
+                    st.error(f"API Communication Error: {e}")
