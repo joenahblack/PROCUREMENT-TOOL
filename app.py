@@ -8,161 +8,117 @@ import json
 import os
 import re
 
-st.set_page_config(page_title="Procurement Automation Tool", layout="wide")
-st.title("📊 Automated Vendor PFI Comparative Analysis (Line-Audit Engine)")
-st.subheader("Upload your template and scanned/digital vendor PFIs to auto-populate names and prices.")
+st.set_page_config(page_title="Procurement Tool - Clean Reset", layout="wide")
+st.title("📊 Procurement Automation (Reset & Diagnose)")
 
-# Sidebar for API Key configuration
+# Sidebar for Setup
 with st.sidebar:
-    st.header("Setup")
+    st.header("Authentication")
     api_key = st.text_input("Enter Gemini API Key:", type="password")
-    st.markdown("[Get a free API Key here](https://aistudio.google.com/)")
+    st.markdown("[Get a fresh API Key here](https://aistudio.google.com/)")
 
-# File Uploaders
-col1, col2 = st.columns(2)
-with col1:
-    template_file = st.file_uploader("1. Upload Excel Template (.xlsx)", type=["xlsx"])
-with col2:
-    pfi_files = st.file_uploader("2. Upload ALL Vendor PFIs together (PDFs)", type=["pdf"], accept_multiple_files=True)
+# Uploads
+template_file = st.file_uploader("1. Upload Excel Template (.xlsx)", type=["xlsx"])
+pfi_file = st.file_uploader("2. Upload JUST ONE Vendor PFI (PDF)", type=["pdf"])
 
 def convert_pdf_to_images(pdf_file):
-    """Converts a scanned PDF into a list of PIL Images using pdf2image."""
     try:
         pdf_bytes = pdf_file.read()
         pdf_file.seek(0)
-        images = convert_from_bytes(pdf_bytes)
-        return images
+        return convert_from_bytes(pdf_bytes)
     except Exception as e:
-        st.error(f"Failed to process PDF pages into images: {e}")
+        st.error(f"Failed to turn PDF into images: {e}")
         return []
 
-def parse_pfi_images_with_ai(pfi_images, row_item_dict, api_key_str):
-    """Sends document images to Gemini to perform OCR and precise line auditing."""
-    try:
-        client = genai.Client(api_key=api_key_str)
-        
-        prompt_text = f"""You are a meticulous procurement forensic auditor. Your job is to extract data from the attached invoice image(s) with 100% horizontal accuracy. 
-        Do not mismatch columns or lines.
-        
-        Our Master Spreadsheet Items (Format is "ROW_NUMBER": "ITEM DESCRIPTION"):
-        {json.dumps(row_item_dict, indent=2)}
-        
-        Your Mission:
-        1. Extract the official Vendor Name from the top header/logo.
-        2. Go line-by-line through the vendor's invoice image. For EACH printed item, find the matching item in our spreadsheet list using your procurement knowledge (abbreviations like BLT, SS, MS, DIA match formal names).
-        3. Double check the table columns on the image. Make sure you extract the UNIT PRICE, not the quantity, serial number, or line total.
-        
-        CRITICAL TWO-STEP OUTPUT FORMAT:
-        You must structure your response exactly like this JSON layout. 
-        Use the "audit_trail" section to write down your reasoning line-by-line first to lock in your accuracy. Then put the final mappings in "row_prices". Do not use markdown wrappers.
-        
-        {{
-            "vendor_name": "Official Vendor Name",
-            "audit_trail": [
-                "Invoice Line 1 says 'HEX BLT 10MM' with unit price 15.00. This matches Spreadsheet Row 9 ('10mm Hexagonal Stainless Bolt')."
-            ],
-            "row_prices": {{
-                "9": 15.00
-            }}
-        }}
-        """
-        
-        contents = [prompt_text]
-        for img in pfi_images:
-            img_byte_arr = io.BytesIO()
-            img.save(img_byte_arr, format='JPEG')
-            img_bytes = img_byte_arr.getvalue()
-            
-            image_part = types.Part.from_bytes(
-                data=img_bytes,
-                mime_type="image/jpeg"
-            )
-            contents.append(image_part)
-        
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-            ),
-        )
-        
-        response_text = response.text.strip()
-        
-        # Display the audit trail logs live in Streamlit
-        with st.expander("🔍 View AI Line-by-Line Match Explanations"):
-            st.code(response_text, language="json")
-            
-        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group(0))
-        else:
-            return {"vendor_name": "Unknown Vendor", "row_prices": {}}
-            
-    except Exception as e:
-        st.error(f"Error communicating with Gemini Vision: {e}")
-        return {"vendor_name": "Unknown Vendor", "row_prices": {}}
-
-if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_files:
+if st.button("🚀 Run Diagnostic Extraction") and template_file and pfi_file:
     if not api_key:
-        st.warning("Please enter your Gemini API Key in the sidebar.")
+        st.warning("Please enter your API Key.")
     else:
-        with st.spinner("Running Audited Line-by-Line Vision Extraction..."):
-            wb = openpyxl.load_workbook(template_file)
-            ws = wb.active
+        # Load your spreadsheet row coordinates
+        wb = openpyxl.load_workbook(template_file)
+        ws = wb.active
+        
+        row_item_dict = {}
+        for row in range(9, ws.max_row + 1):
+            cell_val = ws.cell(row=row, column=3).value # Column C
+            if cell_val:
+                clean_text = str(cell_val).strip()
+                if "ITEM DESCRIPTION" in clean_text.upper():
+                    continue
+                row_item_dict[str(row)] = clean_text
+
+        st.write(f"### Loaded {len(row_item_dict)} target descriptions from Excel Column C.")
+        
+        # Slicing PDF pages
+        images = convert_pdf_to_images(pfi_file)
+        st.write(f"📷 Successfully split invoice into **{len(images)} page image(s)**.")
+        
+        # Connect to Gemini
+        try:
+            client = genai.Client(api_key=api_key)
             
-            row_item_dict = {}
-            for row in range(9, ws.max_row + 1):
-                item_desc = ws.cell(row=row, column=3).value
-                if item_desc:
-                    clean_desc = re.sub(r'\s+', ' ', str(item_desc)).strip()
-                    if "ITEM DESCRIPTION" in clean_desc.upper() or not clean_desc:
-                        continue
-                    row_item_dict[str(row)] = clean_desc
+            prompt = f"""You are a data entry assistant. Look closely at the image of the invoice provided.
             
-            if not row_item_dict:
-                st.error("No item descriptions found in Column C from row 9 down.")
-            else:
-                st.info(f"Loaded {len(row_item_dict)} target items from your comparative matrix.")
-                
-                vendor_start_cols = [5, 8, 11, 14] # E, H, K, N
-                
-                for index, pfi in enumerate(pfi_files[:4]):
-                    st.write(f"📷 Analyzing Layout & Alignment for: **{pfi.name}**...")
-                    
-                    pfi_images = convert_pdf_to_images(pfi)
-                    if not pfi_images:
-                        st.warning(f"Skipping {pfi.name} due to image generation error.")
-                        continue
-                        
-                    extracted_data = parse_pfi_images_with_ai(pfi_images, row_item_dict, api_key)
-                    
-                    vendor_name = extracted_data.get("vendor_name", f"Vendor {index + 1}")
-                    row_prices = extracted_data.get("row_prices", {})
-                    
-                    target_col = vendor_start_cols[index]
-                    ws.cell(row=8, column=target_col).value = vendor_name
-                    
-                    match_count = 0
-                    for row_str, price in row_prices.items():
-                        try:
-                            target_row = int(row_str)
-                            ws.cell(row=target_row, column=target_col).value = float(price)
-                            match_count += 1
-                        except (ValueError, TypeError):
-                            pass
-                    
-                    st.success(f"✅ Finished **{vendor_name}** ({pfi.name}). Mapped {match_count} verified prices.")
-                
-                output_filename = "Populated_Comparative_Analysis.xlsx"
-                wb.save(output_filename)
-                
-                with open(output_filename, "rb") as file:
-                    st.download_button(
-                        label="📥 Download Corrected Excel Sheet",
-                        data=file,
-                        file_name=output_filename,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                
-                os.remove(output_filename)
+            Your tasks:
+            1. Identify the official VENDOR NAME.
+            2. Match the items on this invoice page to our spreadsheet target list below.
+            3. Find the matching item's numeric UNIT PRICE (do not grab quantities, line numbers, or line totals).
+            
+            Our Spreadsheet Target List (Format is "ROW_NUMBER": "DESCRIPTION"):
+            {json.dumps(row_item_dict, indent=2)}
+            
+            Return your answer STRICTLY as a raw JSON dictionary matching this format exactly:
+            {{
+                "vendor_name": "Name of Vendor",
+                "row_prices": {{
+                    "9": 1500.00
+                }}
+            }}"""
+            
+            # Package inputs
+            contents = [prompt]
+            for img in images:
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format='JPEG')
+                contents.append(types.Part.from_bytes(data=img_byte_arr.getvalue(), mime_type="image/jpeg"))
+            
+            with st.spinner("AI is examining the invoice layout..."):
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=contents,
+                    config=types.GenerateContentConfig(response_mime_type="application/json")
+                )
+            
+            # Print EXACTLY what came out of the AI engine
+            st.success("🤖 **Raw Data Received from Gemini:**")
+            raw_result = json.loads(response.text.strip())
+            st.json(raw_result)
+            
+            # Test writing to Excel live
+            st.write("### ⚙️ Writing to Excel Data stream:")
+            vendor_name = raw_result.get("vendor_name", "Unknown Vendor")
+            row_prices = raw_result.get("row_prices", {})
+            
+            # Write Name to E8 (Vendor 1 Column Anchor)
+            ws.cell(row=8, column=5).value = vendor_name
+            st.write(f"✅ Assigned Vendor Name `'{vendor_name}'` to cell `E8`")
+            
+            mapped_count = 0
+            for r_str, price in row_prices.items():
+                try:
+                    r_num = int(r_str)
+                    p_num = float(str(price).replace(",", "").strip())
+                    ws.cell(row=r_num, column=5).value = p_num # Put prices in Column E
+                    st.write(f"➡️ Placed price `{p_num}` onto Row `{r_num}`, Column `E` (Matches: *{row_item_dict.get(r_str)}*)")
+                    mapped_count += 1
+                except Exception as cell_err:
+                    st.error(f"❌ Failed processing row {r_str} with value {price}: {cell_err}")
+            
+            # Generate Download Link if mapping works
+            output_name = "Diagnostic_Output.xlsx"
+            wb.save(output_name)
+            st.download_button("📥 Download Populated Excel Sheet", data=open(output_name, "rb"), file_name=output_name)
+            os.remove(output_name)
+            
+        except Exception as api_err:
+            st.error(f"API pipeline broke down: {api_err}")
