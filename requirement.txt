@@ -1,4 +1,0 @@
-streamlit
-pypdf
-openpyxl
-google-genai
