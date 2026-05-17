@@ -64,8 +64,9 @@ def parse_pfi_with_ai(pfi_text, items_list, api_key_str):
         \"\"\"{pfi_text}\"\"\"
         """
         
+        # Updated to utilize gemini-2.5-flash
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.5-flash',
             contents=prompt
         )
         
@@ -74,87 +75,3 @@ def parse_pfi_with_ai(pfi_text, items_list, api_key_str):
         
         if json_match:
             return json.loads(json_match.group(0))
-        else:
-            st.warning("Could not isolate JSON data from the AI response.")
-            return {"vendor_name": "Unknown Vendor", "prices": {}}
-            
-    except Exception as e:
-        st.error(f"Error communicating with Google AI: {e}")
-        return {"vendor_name": "Unknown Vendor", "prices": {}}
-
-if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_files:
-    if not api_key:
-        st.warning("Please enter your Gemini API Key in the sidebar.")
-    else:
-        with st.spinner("Processing documents..."):
-            wb = openpyxl.load_workbook(template_file)
-            ws = wb.active
-            
-            items = []
-            row_mapping = {}
-            
-            # Read items from Column C starting from row 8 (or lower if headers shift)
-            # Since Vendor Names are on Row 8, let's start reading item lines from Row 9 downwards
-            for row in range(9, ws.max_row + 1):
-                item_desc = ws.cell(row=row, column=3).value # Column 3 is C
-                if item_desc and str(item_desc).strip():
-                    clean_desc = str(item_desc).strip()
-                    # Skip header noise if any accidental rows are parsed
-                    if "ITEM DESCRIPTION" in clean_desc.upper():
-                        continue
-                    items.append(clean_desc)
-                    row_mapping[clean_desc] = row
-            
-            if not items:
-                st.error("No item descriptions found in Column C (checked from row 9 downwards).")
-            else:
-                st.info(f"Found {len(items)} items to look up prices for.")
-                
-                # Excel column tracks:
-                # Vendor 1: Unit Price = E (5), Name = F (6)
-                # Vendor 2: Unit Price = H (8), Name = I (9)
-                # Vendor 3: Unit Price = K (11), Name = L (12)
-                # Vendor 4: Unit Price = N (14), Name = O (15)
-                vendor_unit_cols = [5, 8, 11, 14]
-                vendor_name_cols = [6, 9, 12, 15]
-                
-                for index, pfi in enumerate(pfi_files[:4]):
-                    st.write(f"🔄 Processing PFI: **{pfi.name}**...")
-                    
-                    pfi_text = extract_text_from_pdf(pfi)
-                    extracted_data = parse_pfi_with_ai(pfi_text, items, api_key)
-                    
-                    vendor_name = extracted_data.get("vendor_name", f"Vendor {index + 1}")
-                    extracted_prices = extracted_data.get("prices", {})
-                    
-                    unit_col = vendor_unit_cols[index]
-                    name_col = vendor_name_cols[index]
-                    
-                    # 1. Insert Vendor Name in Row 8 of the corresponding column (F, I, L, or O)
-                    ws.cell(row=8, column=name_col).value = vendor_name
-                    
-                    # 2. Insert Unit Prices into column E, H, K, or N
-                    match_count = 0
-                    for item, price in extracted_prices.items():
-                        if item in row_mapping:
-                            target_row = row_mapping[item]
-                            try:
-                                ws.cell(row=target_row, column=unit_col).value = float(price)
-                                match_count += 1
-                            except ValueError:
-                                pass
-                    
-                    st.success(f"✅ Finished **{vendor_name}** ({pfi.name}). Matched {match_count}/{len(items)} prices.")
-                
-                output_filename = "Populated_Comparative_Analysis.xlsx"
-                wb.save(output_filename)
-                
-                with open(output_filename, "rb") as file:
-                    st.download_button(
-                        label="📥 Download Completed Excel Sheet",
-                        data=file,
-                        file_name=output_filename,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                
-                os.remove(output_filename)
