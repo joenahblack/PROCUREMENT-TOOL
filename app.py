@@ -9,7 +9,7 @@ import os
 import re
 
 st.set_page_config(page_title="Procurement Automation Tool", layout="wide")
-st.title("📊 Automated Vendor PFI Comparative Analysis (Diagnostic Mode)")
+st.title("📊 Automated Vendor PFI Comparative Analysis")
 st.subheader("Upload your template and scanned/digital vendor PFIs to auto-populate names and prices.")
 
 # Sidebar for API Key configuration
@@ -41,23 +41,28 @@ def parse_pfi_images_with_ai(pfi_images, items_list, api_key_str):
     try:
         client = genai.Client(api_key=api_key_str)
         
-        prompt_text = f"""You are a data extraction bot. Look at the attached invoice image(s).
+        prompt_text = f"""You are a master procurement auditor. Analyze the attached invoice/proforma invoice images.
         
-        Task 1: Extract the official VENDOR NAME.
-        Task 2: Read every line item on the invoice and match it to an item description from this target list:
+        Step 1: Extract the official vendor name from the header/logo.
+        Step 2: Read every line item printed on this document. Match them against our Target Items list.
+        
+        Target Items List:
         {json.dumps(items_list)}
         
         Matching Rules:
-        - Match based on keywords, sizes, and specs even if the vendor uses severe abbreviations.
-        - If you see a match, extract its UNIT PRICE as a number.
+        - Be smart and flexible. Vendors use abbreviations (e.g. 'BLT', 'SS', 'MS', 'DIA', 'W/', 'THK').
+        - Match based on specifications, sizes, dimensions, and core item nouns. If they clearly refer to the same physical material, it is a match.
+        - Extract the numeric unit price.
         
-        Return your answer strictly as a JSON object with this exact schema:
+        CRITICAL OUTPUT FORMATTING:
+        You must output your final answer wrapped inside a clean JSON structure block. Ensure the JSON is completely filled with your findings:
         {{
             "vendor_name": "Name of Vendor",
             "prices": {{
-                "EXACT ITEM DESCRIPTION FROM THE TARGET LIST": 123.45
+                "EXACT DESCRIPTIONS FROM TARGET LIST": 1500.00
             }}
-        }}"""
+        }}
+        """
         
         contents = [prompt_text]
         for img in pfi_images:
@@ -71,19 +76,24 @@ def parse_pfi_images_with_ai(pfi_images, items_list, api_key_str):
             )
             contents.append(image_part)
         
+        # We drop the strict system json mode configuration to allow full reasoning/OCR capability
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-            ),
+            contents=contents
         )
         
         response_text = response.text.strip()
-        # Show the raw text in the app so we can debug live!
-        st.expander("🔍 Click to see Raw AI Output for this Vendor").code(response_text, language="json")
         
-        return json.loads(response_text)
+        # Display response diagnostic console
+        with st.expander("🔍 Visual Inspection Log"):
+            st.code(response_text)
+            
+        # Isolate the JSON string from raw markdown text safely
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group(0))
+        else:
+            return {"vendor_name": "Unknown Vendor", "prices": {}}
             
     except Exception as e:
         st.error(f"Error communicating with Gemini Vision: {e}")
@@ -93,7 +103,7 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
     if not api_key:
         st.warning("Please enter your Gemini API Key in the sidebar.")
     else:
-        with st.spinner("Executing OCR Vision Analysis..."):
+        with st.spinner("Executing OCR Vision Analysis... Please keep this window open."):
             wb = openpyxl.load_workbook(template_file)
             ws = wb.active
             
@@ -104,7 +114,6 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
             for row in range(9, ws.max_row + 1):
                 item_desc = ws.cell(row=row, column=3).value
                 if item_desc:
-                    # Clean up spaces, tabs, and hidden break-lines from Excel cell
                     clean_desc = re.sub(r'\s+', ' ', str(item_desc)).strip()
                     if "ITEM DESCRIPTION" in clean_desc.upper() or not clean_desc:
                         continue
@@ -119,7 +128,7 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
                 vendor_start_cols = [5, 8, 11, 14]
                 
                 for index, pfi in enumerate(pfi_files[:4]):
-                    st.write(f"📷 Performing OCR Character Identification on: **{pfi.name}**...")
+                    st.write(f"📷 Processing Document: **{pfi.name}**...")
                     
                     pfi_images = convert_pdf_to_images(pfi)
                     if not pfi_images:
