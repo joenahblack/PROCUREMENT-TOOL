@@ -8,9 +8,9 @@ import json
 import os
 import re
 
-st.set_page_config(page_title="Procurement Tool - Alignment Engine", layout="wide")
-st.title("📊 Part-Quote Alignment Matcher")
-st.subheader("Maps available vendor prices to correct material cells, automatically skipping unquoted items.")
+st.set_page_config(page_title="Multi-Vendor Comparative Analysis Engine", layout="wide")
+st.title("📊 Multi-Vendor Quotation Matcher")
+st.subheader("Upload your template and multiple vendor PDFs to automatically map names and material prices side-by-side.")
 
 # Sidebar for Setup
 with st.sidebar:
@@ -20,22 +20,78 @@ with st.sidebar:
 
 # File Uploaders
 template_file = st.file_uploader("1. Upload Excel Template (.xlsx)", type=["xlsx"])
-pfi_file = st.file_uploader("2. Upload Single Vendor Quotation (PDF)", type=["pdf"])
+pfi_files = st.file_uploader("2. Upload ALL Vendor Quotations (Select multiple PDFs)", type=["pdf"], accept_multiple_files=True)
 
 def convert_pdf_to_images(pdf_file):
+    """Converts multi-page PDFs into clean images for layout scanning."""
     try:
         pdf_bytes = pdf_file.read()
         pdf_file.seek(0)
         return convert_from_bytes(pdf_bytes)
     except Exception as e:
-        st.error(f"Failed to convert PDF to images: {e}")
+        st.error(f"Failed to process pages for {pdf_file.name}: {e}")
         return []
 
-if st.button("🚀 Match & Populate Excel") and template_file and pfi_file:
+def extract_all_vendors_simultaneously(all_document_packages, row_item_dict, api_key_str):
+    """Sends all vendor invoices together to Gemini to align prices into parallel spreadsheet coordinates."""
+    try:
+        client = genai.Client(api_key=api_key_str)
+        
+        prompt_text = f"""You are an elite procurement analytics engine reviewing multiple vendor quotations simultaneously.
+        
+        Our Master Spreadsheet target lines (Format is "ROW_NUMBER": "EXACT MATERIAL DESCRIPTION"):
+        {json.dumps(row_item_dict, indent=2)}
+        
+        YOUR INSTRUCTIONS:
+        1. Look through each attached vendor quotation package individually.
+        2. Extract the official Vendor Name from the letterhead/logo area of that specific package. Strip out any stray quotes.
+        3. Match the items on that invoice to our Master Spreadsheet target list using flexible keyword matching (e.g., abbreviations like BLT, SS, MS, DIA match formal equivalents).
+        4. Extract ONLY the numeric UNIT PRICE for that item. Ignore quantities, totals, or item serial numbers.
+        5. If a vendor did not quote an item on our master list, completely omit its row number from that vendor's dictionary block.
+        
+        OUTPUT FORMATTING RULE:
+        Return your findings strictly as a clean JSON object matching this schema layout. Group your answers by the exact 'file_index' provided to you. Do not include markdown code block syntax formatting or backslashes.
+        
+        {{
+            "quotations": [
+                {{
+                    "file_index": 0,
+                    "vendor_name": "Official Vendor Name 1",
+                    "row_prices": {{
+                        "9": 1500.00,
+                        "12": 435.50
+                    }}
+                }}
+            ]
+        }}"""
+        
+        contents = [prompt_text]
+        
+        # Inject all separate document visual packages into the single data array stream
+        for idx, package in enumerate(all_document_packages):
+            contents.append(f"\n--- START OF VENDOR QUOTATION FILE INDEX {idx} (Filename: {package['name']}) ---")
+            for img in package['images']:
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format='JPEG')
+                contents.append(types.Part.from_bytes(data=img_byte_arr.getvalue(), mime_type="image/jpeg"))
+            contents.append(f"--- END OF VENDOR QUOTATION FILE INDEX {idx} ---")
+            
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=contents,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        
+        return json.loads(response.text.strip())
+    except Exception as e:
+        st.error(f"Failed to communicate with master alignment engine: {e}")
+        return {"quotations": []}
+
+if st.button("🚀 Match & Populate Comparative Sheet") and template_file and pfi_files:
     if not api_key:
         st.warning("Please enter your Gemini API Key in the sidebar.")
     else:
-        with st.spinner("Aligning partial quotation matrices..."):
+        with st.spinner("Analyzing all vendor documents and running comparative grid alignment..."):
             wb = openpyxl.load_workbook(template_file)
             ws = wb.active
             
@@ -49,88 +105,70 @@ if st.button("🚀 Match & Populate Excel") and template_file and pfi_file:
                         continue
                     row_item_dict[str(row)] = clean_desc
             
-            st.info(f"Loaded {len(row_item_dict)} total material items requested from Excel.")
+            st.info(f"Loaded {len(row_item_dict)} target material specifications from template.")
             
-            images = convert_pdf_to_images(pfi_file)
+            # Convert up to 4 PDFs into structured visual packages
+            all_packages = []
+            for pfi in pfi_files[:4]:
+                st.write(f"📷 Scanning text coordinates for document: **{pfi.name}**...")
+                imgs = convert_pdf_to_images(pfi)
+                if imgs:
+                    all_packages.append({"name": pfi.name, "images": imgs})
             
-            if not images:
-                st.error("Could not process PDF pages.")
+            if not all_packages:
+                st.error("No valid vendor pages could be prepared for OCR processing.")
             else:
-                prompt_text = f"""You are a precise procurement data entry operator. Analyze the attached vendor quotation image(s).
+                # Fire the multi-package extraction prompt
+                extracted_data = extract_all_vendors_simultaneously(all_packages, row_item_dict, api_key)
                 
-                CRITICAL INSTRUCTIONS FOR PARTIAL QUOTES:
-                1. Identify the official VENDOR NAME from the document header.
-                2. Cross-reference the items on the invoice with our Master Spreadsheet Items list below.
-                3. The vendor may NOT have quoted for all items requested. For every item the vendor DID quote, find its matching item in our Master list and extract its numeric UNIT PRICE.
-                4. If an item on our Master list is missing from the vendor invoice, DO NOT include its row number in the output dictionary.
-                5. Ensure you extract the UNIT PRICE, not the quantity or line total.
+                # Show live payload map for instant verification
+                st.success("🤖 **Live Cross-Vendor Extraction Matrix Map:**")
+                st.json(extracted_data)
                 
-                Our Master Spreadsheet Items (Format is \"ROW_NUMBER\": \"EXACT MATERIAL DESCRIPTION\"):
-                {json.dumps(row_item_dict, indent=2)}
+                # Spreadsheet Target Tracks: E=Vendor 1 (Col 5), H=Vendor 2 (Col 8), K=Vendor 3 (Col 11), N=Vendor 4 (Col 14)
+                vendor_columns = [5, 8, 11, 14]
+                quotations_list = extracted_data.get("quotations", [])
                 
-                Return your response strictly as a clean JSON object structure (no markdown wrappers):
-                {{
-                    "vendor_name": "Official Vendor Name",
-                    "row_prices": {{
-                        "SPREADSHEET_ROW_NUMBER": 1500.00
-                    }}
-                }}"""
+                st.write("### ⚙️ Excel Multichannel Insertion Logs:")
                 
-                contents = [prompt_text]
-                for img in images:
-                    img_byte_arr = io.BytesIO()
-                    img.save(img_byte_arr, format='JPEG')
-                    contents.append(types.Part.from_bytes(data=img_byte_arr.getvalue(), mime_type="image/jpeg"))
-                
-                try:
-                    client = genai.Client(api_key=api_key)
+                for q_data in quotations_list:
+                    file_idx = q_data.get("file_index")
                     
-                    response = client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents=contents,
-                        config=types.GenerateContentConfig(response_mime_type="application/json")
-                    )
+                    # Ensure the AI returned an index matching our allocated tracks
+                    if file_idx is None or file_idx >= len(vendor_columns):
+                        continue
+                        
+                    target_col = vendor_columns[file_idx]
+                    vendor_name = q_data.get("vendor_name", f"Vendor Slot {file_idx + 1}")
+                    row_prices = q_data.get("row_prices", {})
                     
-                    extracted_data = json.loads(response.text.strip())
+                    # 1. Place Vendor Name in Row 8 of their column tracking line
+                    ws.cell(row=8, column=target_col).value = vendor_name
+                    st.write(f"🏢 Assigned **{vendor_name}** header to Excel Column index `{target_col}`")
                     
-                    # Live status screen print
-                    st.success("🤖 **Live AI Extraction Matrix Map:**")
-                    st.json(extracted_data)
-                    
-                    vendor_name = extracted_data.get("vendor_name", "Unknown Vendor")
-                    row_prices = extracted_data.get("row_prices", {})
-                    
-                    # Place Vendor Name in Column E, Row 8
-                    ws.cell(row=8, column=5).value = vendor_name
-                    
-                    # Inject prices precisely down Column E matching row designations
+                    # 2. Inject prices directly down the column matching the structural spreadsheet rows
                     match_count = 0
-                    st.write("### ⚙️ Cell Allocation Log:")
                     for row_str, price in row_prices.items():
                         try:
                             target_row = int(row_str)
                             clean_price = float(str(price).replace(",", "").strip())
                             
-                            # Input value into cell coordinate
-                            ws.cell(row=target_row, column=5).value = clean_price
-                            st.write(f"➡️ Injected `{clean_price}` into Cell `E{target_row}` (Material Match: *{row_item_dict.get(row_str)}*)")
+                            ws.cell(row=target_row, column=target_col).value = clean_price
                             match_count += 1
                         except (ValueError, TypeError):
                             pass
                             
-                    st.success(f"🎉 Aligned and mapped {match_count} prices for **{vendor_name}** into Column E. Unquoted rows were safely skipped.")
-                    
-                    output_filename = "Aligned_Vendor_Analysis.xlsx"
-                    wb.save(output_filename)
-                    
-                    with open(output_filename, "rb") as file:
-                        st.download_button(
-                            label="📥 Download Aligned Spreadsheet",
-                            data=file,
-                            file_name=output_filename,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    os.remove(output_filename)
-                    
-                except Exception as e:
-                    st.error(f"API Communication Error: {e}")
+                    st.success(f"🏁 Finished processing **{vendor_name}**. Injected {match_count} aligned items into Column Track `{target_col}`.")
+                
+                # Save and expose download
+                output_filename = "Populated_Comparative_Analysis.xlsx"
+                wb.save(output_filename)
+                
+                with open(output_filename, "rb") as file:
+                    st.download_button(
+                        label="📥 Download Ready Comparative Analysis Sheet",
+                        data=file,
+                        file_name=output_filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                os.remove(output_filename)
