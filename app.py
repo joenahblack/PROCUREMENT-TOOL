@@ -93,13 +93,11 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
             items = []
             row_mapping = {}
             
-            # Read items from Column C starting from row 8 (or lower if headers shift)
-            # Since Vendor Names are on Row 8, let's start reading item lines from Row 9 downwards
+            # Read items from Column C starting from row 9 down
             for row in range(9, ws.max_row + 1):
-                item_desc = ws.cell(row=row, column=3).value # Column 3 is C
+                item_desc = ws.cell(row=row, column=3).value
                 if item_desc and str(item_desc).strip():
                     clean_desc = str(item_desc).strip()
-                    # Skip header noise if any accidental rows are parsed
                     if "ITEM DESCRIPTION" in clean_desc.upper():
                         continue
                     items.append(clean_desc)
@@ -110,13 +108,12 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
             else:
                 st.info(f"Found {len(items)} items to look up prices for.")
                 
-                # Excel column tracks:
-                # Vendor 1: Unit Price = E (5), Name = F (6)
-                # Vendor 2: Unit Price = H (8), Name = I (9)
-                # Vendor 3: Unit Price = K (11), Name = L (12)
-                # Vendor 4: Unit Price = N (14), Name = O (15)
-                vendor_unit_cols = [5, 8, 11, 14]
-                vendor_name_cols = [6, 9, 12, 15]
+                # Column index numbers mapping: 
+                # Vendor 1 starting column = E (5)
+                # Vendor 2 starting column = H (8)
+                # Vendor 3 starting column = K (11)
+                # Vendor 4 starting column = N (14)
+                vendor_start_cols = [5, 8, 11, 14]
                 
                 for index, pfi in enumerate(pfi_files[:4]):
                     st.write(f"🔄 Processing PFI: **{pfi.name}**...")
@@ -127,19 +124,20 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
                     vendor_name = extracted_data.get("vendor_name", f"Vendor {index + 1}")
                     extracted_prices = extracted_data.get("prices", {})
                     
-                    unit_col = vendor_unit_cols[index]
-                    name_col = vendor_name_cols[index]
+                    # Both name and unit prices are anchored to this column index
+                    target_col = vendor_start_cols[index]
                     
-                    # 1. Insert Vendor Name in Row 8 of the corresponding column (F, I, L, or O)
-                    ws.cell(row=8, column=name_col).value = vendor_name
+                    # 1. Insert Vendor Name in Row 8 of the vendor's starting column (E, H, K, or N)
+                    # Writing to the primary cell of a merged block keeps openpyxl happy!
+                    ws.cell(row=8, column=target_col).value = vendor_name
                     
-                    # 2. Insert Unit Prices into column E, H, K, or N
+                    # 2. Insert Unit Prices into the same column downwards
                     match_count = 0
                     for item, price in extracted_prices.items():
                         if item in row_mapping:
                             target_row = row_mapping[item]
                             try:
-                                ws.cell(row=target_row, column=unit_col).value = float(price)
+                                ws.cell(row=target_row, column=target_col).value = float(price)
                                 match_count += 1
                             except ValueError:
                                 pass
