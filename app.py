@@ -52,7 +52,7 @@ def parse_pfi_with_ai(pfi_text, items_list, api_key_str):
     """
     
     response = client.models.generate_content(
-        model='gemini-2.5-flash',
+        model='gemini-1.5-flash',
         contents=prompt,
         config={'response_mime_type': 'application/json'}
     )
