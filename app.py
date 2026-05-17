@@ -4,6 +4,7 @@ import openpyxl
 from google import genai
 import json
 import os
+import re
 
 st.set_page_config(page_title="Procurement Automation Tool", layout="wide")
 st.title("📊 Automated Vendor PFI Comparative Analysis")
@@ -32,35 +33,50 @@ def extract_text_from_pdf(pdf_file):
 
 def parse_pfi_with_ai(pfi_text, items_list, api_key_str):
     """Uses Gemini to find the unit prices for our target items from the raw PFI text."""
-    client = genai.Client(api_key=api_key_str)
-    
-    prompt = f"""
-    You are an expert procurement data extraction tool.
-    I am going to give you the raw text extracted from a Vendor's Proforma Invoice (PFI).
-    I want you to find the UNIT PRICE for the following target items.
-    
-    Target Items to look for:
-    {json.dumps(items_list)}
-    
-    Instructions:
-    1. Look closely at the PFI text. Match the items even if the vendor's description is slightly different or abbreviated.
-    2. Extract the Unit Price for each matched item.
-    3. Return the result STRICTLY as a JSON dictionary where the keys are the EXACT item descriptions from the target list, and values are numbers (floats) representing the unit price. If an item is not found in the PFI, omit it from the dictionary.
-    
-    Raw PFI Text:
-    \"\"\"{pfi_text}\"\"\"
-    """
-    
-    response = client.models.generate_content(
-        model='gemini-1.5-flash',
-        contents=prompt,
-        config={'response_mime_type': 'application/json'}
-    )
-    
     try:
-        return json.loads(response.text)
+        client = genai.Client(api_key=api_key_str)
+        
+        prompt = f"""
+        You are an expert procurement data extraction tool.
+        Look closely at the raw text extracted from a Vendor's Proforma Invoice (PFI).
+        Find the UNIT PRICE for the following target items.
+        
+        Target Items to look for:
+        {json.dumps(items_list)}
+        
+        Instructions:
+        1. Match the items even if the vendor's description is slightly different or abbreviated.
+        2. Extract the Unit Price for each matched item.
+        3. Provide your answer as a raw JSON dictionary where the keys are the EXACT item descriptions from the target list, and values are numbers (floats) representing the unit price. If an item is not found, omit it.
+        
+        Example Output format:
+        {{
+            "ITEM DESCRIPTION 1": 1500.50,
+            "ITEM DESCRIPTION 2": 450.00
+        }}
+
+        Raw PFI Text:
+        \"\"\"{pfi_text}\"\"\"
+        """
+        
+        # Using gemini-1.5-flash for maximum reliability across accounts
+        response = client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=prompt
+        )
+        
+        # Extract the JSON block out of the text response safely
+        response_text = response.text
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        
+        if json_match:
+            return json.loads(json_match.group(0))
+        else:
+            st.warning("Could not isolate JSON data from the AI response.")
+            return {}
+            
     except Exception as e:
-        st.error(f"Failed to parse AI response: {e}")
+        st.error(f"Error communicating with Google AI: {e}")
         return {}
 
 if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_files:
@@ -68,16 +84,15 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
         st.warning("Please enter your Gemini API Key in the sidebar.")
     else:
         with st.spinner("Processing documents..."):
-            # 1. Load the Excel Template
             wb = openpyxl.load_workbook(template_file)
-            ws = wb.active # Assumes first sheet
+            ws = wb.active
             
-            # 2. Read the items from Column C (Item Description), starting from row 8
             items = []
-            row_mapping = {} # To remember which item belongs to which Excel row
+            row_mapping = {}
             
+            # Read items from Column C starting from row 8
             for row in range(8, ws.max_row + 1):
-                item_desc = ws.cell(row=row, column=3).value # Column 3 is C
+                item_desc = ws.cell(row=row, column=3).value
                 if item_desc and str(item_desc).strip():
                     clean_desc = str(item_desc).strip()
                     items.append(clean_desc)
@@ -88,35 +103,29 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
             else:
                 st.info(f"Found {len(items)} items to look up prices for.")
                 
-                # 3. Define the column index mapping for vendors
-                # Vendor 1 Unit Price = Col E (5)
-                # Vendor 2 Unit Price = Col H (8)
-                # Vendor 3 Unit Price = Col K (11)
-                # Vendor 4 Unit Price = Col N (14)
+                # Excel column numbers for vendor unit prices (E, H, K, N)
                 vendor_unit_cols = [5, 8, 11, 14]
                 
-                # Loop through each uploaded PFI file (up to 4)
                 for index, pfi in enumerate(pfi_files[:4]):
                     st.write(f"🔄 Processing PFI: **{pfi.name}** as Vendor {index + 1}...")
                     
-                    # Extract text and send to Gemini
                     pfi_text = extract_text_from_pdf(pfi)
                     extracted_prices = parse_pfi_with_ai(pfi_text, items, api_key)
                     
-                    # Target column for this vendor's unit price
                     target_col = vendor_unit_cols[index]
                     
-                    # Write prices into the spreadsheet
                     match_count = 0
                     for item, price in extracted_prices.items():
                         if item in row_mapping:
                             target_row = row_mapping[item]
-                            ws.cell(row=target_row, column=target_col).value = float(price)
-                            match_count += 1
+                            try:
+                                ws.cell(row=target_row, column=target_col).value = float(price)
+                                match_count += 1
+                            except ValueError:
+                                pass # Skip if price isn't a valid number
                     
                     st.success(f"✅ Finished {pfi.name}. Matched {match_count}/{len(items)} prices.")
                 
-                # 4. Save file back to binary memory so the user can download it
                 output_filename = "Populated_Comparative_Analysis.xlsx"
                 wb.save(output_filename)
                 
@@ -128,5 +137,4 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
                 
-                # Clean up local file copy
                 os.remove(output_filename)
