@@ -9,7 +9,7 @@ import os
 import re
 
 st.set_page_config(page_title="Procurement Automation Tool", layout="wide")
-st.title("📊 Automated Vendor PFI Comparative Analysis")
+st.title("📊 Automated Vendor PFI Comparative Analysis (Row-Mapping Engine)")
 st.subheader("Upload your template and scanned/digital vendor PFIs to auto-populate names and prices.")
 
 # Sidebar for API Key configuration
@@ -36,30 +36,32 @@ def convert_pdf_to_images(pdf_file):
         st.error(f"Failed to process PDF pages into images: {e}")
         return []
 
-def parse_pfi_images_with_ai(pfi_images, items_list, api_key_str):
-    """Sends document images to Gemini 2.5 Flash to perform OCR and price extraction."""
+def parse_pfi_images_with_ai(pfi_images, row_item_dict, api_key_str):
+    """Sends document images to Gemini to perform OCR and direct row mapping."""
     try:
         client = genai.Client(api_key=api_key_str)
         
-        prompt_text = f"""You are a master procurement auditor. Analyze the attached invoice/proforma invoice images.
+        prompt_text = f"""You are a master procurement auditor mapping vendor invoice prices directly to our spreadsheet row coordinates.
+        Look closely at the attached invoice image(s).
         
-        Step 1: Extract the official vendor name from the header/logo.
-        Step 2: Read every line item printed on this document. Match them against our Target Items list.
+        Your Core Instructions:
+        1. Extract the official Vendor Name from the letterhead/logo at the top.
+        2. Match the items printed on this invoice image to our Master Spreadsheet Items list below.
+        3. For every item you match, extract its numeric UNIT PRICE and pair it directly with its corresponding SPREADSHEET ROW NUMBER.
         
-        Target Items List:
-        {json.dumps(items_list)}
+        Master Spreadsheet Items (Format is "ROW_NUMBER": "ITEM DESCRIPTION"):
+        {json.dumps(row_item_dict, indent=2)}
         
-        Matching Rules:
-        - Be smart and flexible. Vendors use abbreviations (e.g. 'BLT', 'SS', 'MS', 'DIA', 'W/', 'THK').
-        - Match based on specifications, sizes, dimensions, and core item nouns. If they clearly refer to the same physical material, it is a match.
-        - Extract the numeric unit price.
+        Matching Guardrails:
+        - Vendors will use heavy abbreviations, different word orders, or shortened specs (e.g., 'BLT' vs 'Bolt', 'SS' vs 'Stainless', '10mm' vs 'M10'). Match them flexibly using your engineering and procurement knowledge.
+        - Only return matches where you are confident the physical item is the same.
         
-        CRITICAL OUTPUT FORMATTING:
-        You must output your final answer wrapped inside a clean JSON structure block. Ensure the JSON is completely filled with your findings:
+        OUTPUT FORMAT:
+        You must output your findings strictly as a clean JSON object structure. Do not wrap it in markdown code blocks.
         {{
-            "vendor_name": "Name of Vendor",
-            "prices": {{
-                "EXACT DESCRIPTIONS FROM TARGET LIST": 1500.00
+            "vendor_name": "Official Vendor Name",
+            "row_prices": {{
+                "ROW_NUMBER_AS_STRING": 1250.00
             }}
         }}
         """
@@ -76,55 +78,56 @@ def parse_pfi_images_with_ai(pfi_images, items_list, api_key_str):
             )
             contents.append(image_part)
         
-        # We drop the strict system json mode configuration to allow full reasoning/OCR capability
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=contents
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+            ),
         )
         
         response_text = response.text.strip()
         
-        # Display response diagnostic console
-        with st.expander("🔍 Visual Inspection Log"):
-            st.code(response_text)
+        # Display response diagnostic logs
+        with st.expander("🔍 Live AI Extraction Inspection Log"):
+            st.code(response_text, language="json")
             
-        # Isolate the JSON string from raw markdown text safely
         json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
         if json_match:
             return json.loads(json_match.group(0))
         else:
-            return {"vendor_name": "Unknown Vendor", "prices": {}}
+            return {"vendor_name": "Unknown Vendor", "row_prices": {}}
             
     except Exception as e:
         st.error(f"Error communicating with Gemini Vision: {e}")
-        return {"vendor_name": "Unknown Vendor", "prices": {}}
+        return {"vendor_name": "Unknown Vendor", "row_prices": {}}
 
 if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_files:
     if not api_key:
         st.warning("Please enter your Gemini API Key in the sidebar.")
     else:
-        with st.spinner("Executing OCR Vision Analysis... Please keep this window open."):
+        with st.spinner("Executing Coordinate OCR Vision Analysis..."):
             wb = openpyxl.load_workbook(template_file)
             ws = wb.active
             
-            items = []
-            row_mapping = {}
+            # Map Row Numbers directly to Descriptions to eliminate Python matching errors
+            row_item_dict = {}
             
-            # Read items from Column C starting from row 9 down
             for row in range(9, ws.max_row + 1):
-                item_desc = ws.cell(row=row, column=3).value
+                item_desc = ws.cell(row=row, column=3).value # Column C
                 if item_desc:
                     clean_desc = re.sub(r'\s+', ' ', str(item_desc)).strip()
                     if "ITEM DESCRIPTION" in clean_desc.upper() or not clean_desc:
                         continue
-                    items.append(clean_desc)
-                    row_mapping[clean_desc] = row
+                    # Store row as string key for seamless JSON processing
+                    row_item_dict[str(row)] = clean_desc
             
-            if not items:
-                st.error("No item descriptions discovered in Column C (checked from row 9 down).")
+            if not row_item_dict:
+                st.error("No item descriptions found in Column C from row 9 down.")
             else:
-                st.info(f"Targeting {len(items)} matrix items for pricing updates.")
+                st.info(f"Loaded {len(row_item_dict)} items from your spreadsheet matrix.")
                 
+                # Target columns for Vendor 1, 2, 3, 4 (E, H, K, N)
                 vendor_start_cols = [5, 8, 11, 14]
                 
                 for index, pfi in enumerate(pfi_files[:4]):
@@ -132,29 +135,31 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
                     
                     pfi_images = convert_pdf_to_images(pfi)
                     if not pfi_images:
-                        st.warning(f"Skipping {pfi.name} due to PDF processing error.")
+                        st.warning(f"Skipping {pfi.name} due to PDF transformation error.")
                         continue
                         
-                    extracted_data = parse_pfi_images_with_ai(pfi_images, items, api_key)
+                    # Request data from Gemini using direct row mapping payload
+                    extracted_data = parse_pfi_images_with_ai(pfi_images, row_item_dict, api_key)
                     
                     vendor_name = extracted_data.get("vendor_name", f"Vendor {index + 1}")
-                    extracted_prices = extracted_data.get("prices", {})
+                    row_prices = extracted_data.get("row_prices", {})
                     
                     target_col = vendor_start_cols[index]
+                    
+                    # Write vendor name to Row 8
                     ws.cell(row=8, column=target_col).value = vendor_name
                     
                     match_count = 0
-                    for item, price in extracted_prices.items():
-                        clean_item_key = re.sub(r'\s+', ' ', str(item)).strip()
-                        if clean_item_key in row_mapping:
-                            target_row = row_mapping[clean_item_key]
-                            try:
-                                ws.cell(row=target_row, column=target_col).value = float(price)
-                                match_count += 1
-                            except (ValueError, TypeError):
-                                pass
+                    # Write values directly into the row numbers specified by the AI
+                    for row_str, price in row_prices.items():
+                        try:
+                            target_row = int(row_str)
+                            ws.cell(row=target_row, column=target_col).value = float(price)
+                            match_count += 1
+                        except (ValueError, TypeError):
+                            pass
                     
-                    st.success(f"✅ Extracted **{vendor_name}** ({pfi.name}). Successfully identified and mapped {match_count}/{len(items)} prices.")
+                    st.success(f"✅ Extracted **{vendor_name}** ({pfi.name}). Successfully mapped {match_count} items directly to rows.")
                 
                 output_filename = "Populated_Comparative_Analysis.xlsx"
                 wb.save(output_filename)
