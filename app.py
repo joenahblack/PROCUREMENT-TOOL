@@ -33,35 +33,35 @@ def convert_pdf_to_images(pdf_file):
         return []
 
 def extract_all_vendors_simultaneously(all_document_packages, row_item_dict, api_key_str):
-    """Sends all vendor invoices together to Gemini with hyper-permissive matching rules."""
+    """Sends all vendor invoices together to Gemini with strict column targeting for Moseng."""
     try:
         client = genai.Client(api_key=api_key_str)
         
-        prompt_text = f"""You are a senior procurement forensics manager. You are auditing multiple vendor quotations simultaneously, including documents from vendors like Moseng.
+        prompt_text = f"""You are a precise procurement analytics engine. You are auditing multiple vendor quotations side-by-side.
         
         Our Master Spreadsheet target lines (Format is "ROW_NUMBER": "EXACT MATERIAL DESCRIPTION"):
         {json.dumps(row_item_dict, indent=2)}
         
         YOUR INSTRUCTIONS:
         1. Look through each attached vendor quotation package individually.
-        2. Extract the official Vendor Name from the letterhead/logo area. Strip out any stray quotes.
-        3. Match the items on that invoice to our Master Spreadsheet target list.
+        2. Extract the official Vendor Name from the letterhead. Strip out any stray quotes.
+        3. Match the invoice line items to our Master Spreadsheet target list using flexible keyword matching (abbreviations like BLT, SS, MS match formal terms).
         
-        CRITICAL OVERRIDE FOR VENDORS WITH UNUSUAL LAYOUTS (e.g., Moseng):
-        - Some vendors use internal item codes, list dimensions differently, or quote functional substitutes. 
-        - Use your deep engineering and procurement domain knowledge to force a match if the physical material is clearly intended for that slot.
-        - Ignore manufacturer part numbers, line order numbers, or minor brand differences. If it is a functional match, link it to our spreadsheet row!
-        - Make absolutely sure you are pulling the UNIT PRICE, not the quantity, item index, or total row cost.
-        4. If a vendor completely omitted an item from their quote, omit its row number from that vendor's dictionary block.
+        CRITICAL ROW TRACKING GUARDRAIL (Pay close attention to Moseng):
+        - Look closely at the table column headers on the invoice image (e.g., Qty, Rate/Unit Price, Total/Amount).
+        - To prevent column scrambling or line juggling, track carefully left-to-right across the page.
+        - Extract ONLY the numeric UNIT PRICE (sometimes labeled as 'Rate', 'Unit Cost', or 'Price Each'). 
+        - NEVER extract the item serial number, the quantity, or the line total amount. If a row doesn't have a clear unit price, do not map it.
+        - If a vendor completely omitted an item from their quote, omit its row number from that vendor's dictionary block.
         
         OUTPUT FORMATTING RULE:
-        Return your findings strictly as a clean JSON object matching this schema layout. Group your answers by the exact 'file_index' provided to you. Do not include markdown code block syntax formatting or backslashes.
+        Return your findings strictly as a clean, simple JSON object matching this schema layout. Group your answers by the exact 'file_index' provided to you. Do not include markdown code block syntax formatting or backslashes.
         
         {{
             "quotations": [
                 {{
                     "file_index": 0,
-                    "vendor_name": "Official Vendor Name 1",
+                    "vendor_name": "Official Vendor Name",
                     "row_prices": {{
                         "9": 1500.00,
                         "12": 435.50
