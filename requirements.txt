@@ -2,3 +2,5 @@ pypdf
 openpyxl
 google-genai
 streamlit
+pdf2image
+pillow
