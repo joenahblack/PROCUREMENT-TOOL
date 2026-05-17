@@ -9,7 +9,7 @@ import os
 import re
 
 st.set_page_config(page_title="Procurement Automation Tool", layout="wide")
-st.title("📊 Automated Vendor PFI Comparative Analysis (Precision Engine)")
+st.title("📊 Automated Vendor PFI Comparative Analysis (Diagnostic Mode)")
 st.subheader("Upload your template and scanned/digital vendor PFIs to auto-populate names and prices.")
 
 # Sidebar for API Key configuration
@@ -41,25 +41,21 @@ def parse_pfi_images_with_ai(pfi_images, items_list, api_key_str):
     try:
         client = genai.Client(api_key=api_key_str)
         
-        prompt_text = f"""You are a senior procurement analyst auditing a vendor Proforma Invoice (PFI).
-        Look closely at the attached invoice image(s). Your job is to extract pricing data and match it to our internal Target Items list.
+        prompt_text = f"""You are a data extraction bot. Look at the attached invoice image(s).
         
-        Our Internal Target Items List:
+        Task 1: Extract the official VENDOR NAME.
+        Task 2: Read every line item on the invoice and match it to an item description from this target list:
         {json.dumps(items_list)}
         
-        INSTRUCTIONS:
-        1. Look for the vendor name at the top letterhead, logo, or stamp, and extract it.
-        2. Go line-by-line through the items on the vendor PFI image. 
-        3. Match the vendor's line items to our Target Items List by identifying core nouns, sizes, specifications, and materials (even if abbreviated, shortened, or in a different word order). 
-           - For example, if our target is "10mm Hexagonal Stainless Bolt" and the vendor wrote "HEX BLT 10MM SS", that is a match.
-        4. Extract the numeric UNIT PRICE for each matched item. Ignore currency symbols, commas, or total values.
+        Matching Rules:
+        - Match based on keywords, sizes, and specs even if the vendor uses severe abbreviations.
+        - If you see a match, extract its UNIT PRICE as a number.
         
-        CRITICAL: Return your output strictly as a JSON object matching this structure. Do not include markdown code block syntax around the JSON:
+        Return your answer strictly as a JSON object with this exact schema:
         {{
             "vendor_name": "Name of Vendor",
             "prices": {{
-                "EXACT TARGET ITEM DESCRIPTION FROM OUR LIST 1": 1500.50,
-                "EXACT TARGET ITEM DESCRIPTION FROM OUR LIST 2": 420.00
+                "EXACT ITEM DESCRIPTION FROM THE TARGET LIST": 123.45
             }}
         }}"""
         
@@ -75,7 +71,6 @@ def parse_pfi_images_with_ai(pfi_images, items_list, api_key_str):
             )
             contents.append(image_part)
         
-        # Setting a strict json configuration to force compliant structured mapping
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=contents,
@@ -85,6 +80,9 @@ def parse_pfi_images_with_ai(pfi_images, items_list, api_key_str):
         )
         
         response_text = response.text.strip()
+        # Show the raw text in the app so we can debug live!
+        st.expander("🔍 Click to see Raw AI Output for this Vendor").code(response_text, language="json")
+        
         return json.loads(response_text)
             
     except Exception as e:
@@ -105,9 +103,10 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
             # Read items from Column C starting from row 9 down
             for row in range(9, ws.max_row + 1):
                 item_desc = ws.cell(row=row, column=3).value
-                if item_desc and str(item_desc).strip():
-                    clean_desc = str(item_desc).strip()
-                    if "ITEM DESCRIPTION" in clean_desc.upper():
+                if item_desc:
+                    # Clean up spaces, tabs, and hidden break-lines from Excel cell
+                    clean_desc = re.sub(r'\s+', ' ', str(item_desc)).strip()
+                    if "ITEM DESCRIPTION" in clean_desc.upper() or not clean_desc:
                         continue
                     items.append(clean_desc)
                     row_mapping[clean_desc] = row
@@ -117,7 +116,6 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
             else:
                 st.info(f"Targeting {len(items)} matrix items for pricing updates.")
                 
-                # Excel column numbers for matching coordinates (E, H, K, N)
                 vendor_start_cols = [5, 8, 11, 14]
                 
                 for index, pfi in enumerate(pfi_files[:4]):
@@ -134,15 +132,11 @@ if st.button("🚀 Process Invoices & Match Prices") and template_file and pfi_f
                     extracted_prices = extracted_data.get("prices", {})
                     
                     target_col = vendor_start_cols[index]
-                    
-                    # 1. Place Vendor Name in Row 8
                     ws.cell(row=8, column=target_col).value = vendor_name
                     
-                    # 2. Match pricing rows
                     match_count = 0
                     for item, price in extracted_prices.items():
-                        # Standardize checking to clean up minor whitespace mismatches
-                        clean_item_key = str(item).strip()
+                        clean_item_key = re.sub(r'\s+', ' ', str(item)).strip()
                         if clean_item_key in row_mapping:
                             target_row = row_mapping[clean_item_key]
                             try:
